@@ -1,12 +1,33 @@
-import cv2
-import mediapipe as mp
-import numpy as np
 from collections import deque
 import math
 import cvzone
 from cvzone.ColorModule import ColorFinder
+import time
+from absl import app, logging
+import cv2
+import mediapipe as mp
+import numpy as np
 import tensorflow.compat.v1 as tf
+from flask import Flask, request, Response, jsonify, send_from_directory, abort
+import os
+import sys
+from sys import platform
+import argparse
+import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
+from statistics import mean
 tf.disable_v2_behavior()
+
+
+shooting_result = {
+    'attempts': 0,
+    'made': 0,
+    'miss': 0,
+    'avg_elbow_angle': 0,
+    'avg_knee_angle': 0,
+    'avg_release_angle': 0,
+    'avg_ballInHand_time': 0
+}
 
 def tensorflow_init():
     MODEL_NAME = 'inference_graph'
@@ -27,45 +48,6 @@ def tensorflow_init():
     num_detections = detection_graph.get_tensor_by_name('num_detections:0')
     return detection_graph, image_tensor, boxes, scores, classes, num_detections
 
-def detect_API(img):
-    response = []
-    height, width = img.shape[:2]
-    detection_graph, image_tensor, boxes, scores, classes, num_detections = tensorflow_init()
-
-    with tf.Session(graph=detection_graph) as sess:
-        img_expanded = np.expand_dims(img, axis=0)
-        (boxes, scores, classes, num_detections) = sess.run(
-            [boxes, scores, classes, num_detections],
-            feed_dict={image_tensor: img_expanded})
-
-        for i, box in enumerate(boxes[0]):
-            if (scores[0][i] > 0.5):
-                ymin = int((box[0] * height))
-                xmin = int((box[1] * width))
-                ymax = int((box[2] * height))
-                xmax = int((box[3] * width))
-                xCoor = int(np.mean([xmin, xmax]))
-                yCoor = int(np.mean([ymin, ymax]))
-                if(classes[0][i] == 1):  # basketball
-                    print("basketball found")
-                    response.append({
-                        'class': 'Basketball',
-                        'detection_detail': {
-                            'confidence': float(scores[0][i]),
-                            'center_coordinate': {'x': xCoor, 'y': yCoor},
-                            'box_boundary': {'x_min': xmin, 'x_max': xmax, 'y_min': ymin, 'y_max': ymax}
-                        }
-                    })
-                if(classes[0][i] == 2):  # Rim
-                    print("rim found")
-                    response.append({
-                        'class': 'Hoop',
-                        'detection_detail': {
-                            'confidence': float(scores[0][i]),
-                            'center_coordinate': {'x': xCoor, 'y': yCoor},
-                            'box_boundary': {'x_min': xmin, 'x_max': xmax, 'y_min': ymin, 'y_max': ymax}
-                        }
-                    })
 
 # Mapping dictionary to map keypoints from Mediapipe to our Classifier model
 lm_dict = {
@@ -176,7 +158,7 @@ def get_angle(img, landmark_list, point1, point2, point3, lefty, draw=True):
 
 # Setting variables for video feed
 def set_video_feed_variables():
-    cap = cv2.VideoCapture("videos/IMG_0654.MOV")
+    cap = cv2.VideoCapture("analysis/Videos/try.MOV")
     count = 0
     direction = 0
     form = 0
@@ -224,6 +206,222 @@ def display_workout_stats(count, form, feedback, draw_percentage_progress_bar, s
     show_workout_feedback(feedback, img)
 
 
+def fit_func(x, a, b, c):
+    return a*(x ** 2) + b * x + c
+
+
+def trajectory_fit(balls, height, width, shotJudgement, fig):
+    x = [ball[0] for ball in balls]
+    y = [height - ball[1] for ball in balls]
+
+    try:
+        params = curve_fit(fit_func, x, y)
+        [a, b, c] = params[0]   
+    except:
+        print("fitting error")
+        a = 0
+        b = 0
+        c = 0
+    x_pos = np.arange(0, width, 1)
+    y_pos = [(a * (x_val ** 2)) + (b * x_val) + c for x_val in x_pos]
+
+    if(shotJudgement == "MISS"):
+        plt.plot(x, y, 'ro', figure=fig)
+        plt.plot(x_pos, y_pos, linestyle='-', color='red',
+                 alpha=0.4, linewidth=5, figure=fig)
+    else:
+        plt.plot(x, y, 'go', figure=fig)
+        plt.plot(x_pos, y_pos, linestyle='-', color='green',
+                 alpha=0.4, linewidth=5, figure=fig)
+
+def distance(x, y):
+    return ((y[0] - x[0]) ** 2 + (y[1] - x[1]) ** 2) ** (1/2)
+
+
+def calculateAngle(a, b, c):
+    ba = a - b
+    bc = c - b
+    cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+    angle = np.arccos(cosine_angle)
+    return round(np.degrees(angle), 2)
+
+
+
+def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, classes, num_detections, previous, during_shooting, shot_result, fig, shooting_pose,
+                head_landmark, hand_landmark, elbow_angle, knee_angle, right_elbow_landmark, right_knee_landmark):
+    global shooting_result
+
+    if(shot_result['displayFrames'] > 0):
+        shot_result['displayFrames'] -= 1
+    if(shot_result['release_displayFrames'] > 0):
+        shot_result['release_displayFrames'] -= 1
+    if(shooting_pose['ball_in_hand']):
+        shooting_pose['ballInHand_frames'] += 1
+    #     # print("ball in hand")
+
+
+    headX, headY = head_landmark[1:]
+    handX, handY = hand_landmark[1:]
+    elbowAngle = elbow_angle
+    kneeAngle = knee_angle
+    elbowX, elbowY = right_elbow_landmark[1:]
+    kneeX, kneeY = right_knee_landmark[1:]
+
+    frame_expanded = np.expand_dims(frame, axis=0)
+    # main tensorflow detection
+    (boxes, scores, classes, num_detections) = sess.run(
+        [boxes, scores, classes, num_detections],
+        feed_dict={image_tensor: frame_expanded})
+
+    # displaying MediaPipe keypoints, joint angle and release angle
+    # frame = results.pose_landmarks.render(frame, mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2), mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2))
+
+    cv2.putText(frame, 'Elbow: ' + str(elbowAngle) + ' deg',
+                (elbowX + 65, elbowY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+    cv2.putText(frame, 'Knee: ' + str(kneeAngle) + ' deg',
+                (kneeX + 65, kneeY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+    if(shot_result['release_displayFrames']):
+        cv2.putText(frame, 'Release: ' + str(during_shooting['release_angle_list'][-1]) + ' deg',
+                    (during_shooting['release_point'][0] - 80, during_shooting['release_point'][1] + 80), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 255), 3)
+
+    for i, box in enumerate(boxes[0]):
+        if (scores[0][i] > 0.5):
+            ymin = int((box[0] * height))
+            xmin = int((box[1] * width))
+            ymax = int((box[2] * height))
+            xmax = int((box[3] * width))
+            xCoor = int(np.mean([xmin, xmax]))
+            yCoor = int(np.mean([ymin, ymax]))
+            # Basketball (not head)
+            if(classes[0][i] == 1 and (distance([headX, headY], [xCoor, yCoor]) > 30)):
+
+                # recording shooting pose
+                if(distance([xCoor, yCoor], [handX, handY]) < 120):
+                    shooting_pose['ball_in_hand'] = True
+                    shooting_pose['knee_angle'] = min(
+                        shooting_pose['knee_angle'], kneeAngle)
+                    shooting_pose['elbow_angle'] = min(
+                        shooting_pose['elbow_angle'], elbowAngle)
+                else:
+                    shooting_pose['ball_in_hand'] = False
+
+                # During Shooting
+                if(ymin < (previous['hoop_height'])):
+                    if(not during_shooting['isShooting']):
+                        during_shooting['isShooting'] = True
+
+                    during_shooting['balls_during_shooting'].append(
+                        [xCoor, yCoor])
+
+                    #calculating release angle
+                    if(len(during_shooting['balls_during_shooting']) == 2):
+                        first_shooting_point = during_shooting['balls_during_shooting'][0]
+                        release_angle = calculateAngle(np.array(during_shooting['balls_during_shooting'][1]), np.array(
+                            first_shooting_point), np.array([first_shooting_point[0] + 1, first_shooting_point[1]]))
+                        if(release_angle > 90):
+                            release_angle = 180 - release_angle
+                        during_shooting['release_angle_list'].append(
+                            release_angle)
+                        during_shooting['release_point'] = first_shooting_point
+                        shot_result['release_displayFrames'] = 30
+                        print("release angle:", release_angle)
+
+                    #draw purple circle
+                    cv2.circle(img=frame, center=(xCoor, yCoor), radius=7,
+                               color=(235, 103, 193), thickness=3)
+                    cv2.circle(img=trace, center=(xCoor, yCoor), radius=7,
+                               color=(235, 103, 193), thickness=3)
+
+                # Not shooting
+                elif(ymin >= (previous['hoop_height'] - 30) and (distance([xCoor, yCoor], previous['ball']) < 100)):
+                    # the moment when ball go below basket
+                    if(during_shooting['isShooting']):
+                        if(xCoor >= previous['hoop'][0] and xCoor <= previous['hoop'][2]):  # shot
+                            shooting_result['attempts'] += 1
+                            shooting_result['made'] += 1
+                            shot_result['displayFrames'] = 10
+                            shot_result['judgement'] = "SCORE"
+                            print("SCORE")
+                            # draw green trace when miss
+                            points = np.asarray(
+                                during_shooting['balls_during_shooting'], dtype=np.int32)
+                            cv2.polylines(trace, [points], False, color=(
+                                82, 168, 50), thickness=2, lineType=cv2.LINE_AA)
+                            for ballCoor in during_shooting['balls_during_shooting']:
+                                cv2.circle(img=trace, center=(ballCoor[0], ballCoor[1]), radius=10,
+                                           color=(82, 168, 50), thickness=-1)
+                        else:  # miss
+                            shooting_result['attempts'] += 1
+                            shooting_result['miss'] += 1
+                            shot_result['displayFrames'] = 10
+                            shot_result['judgement'] = "MISS"
+                            print("miss")
+                            # draw red trace when miss
+                            points = np.asarray(
+                                during_shooting['balls_during_shooting'], dtype=np.int32)
+                            cv2.polylines(trace, [points], color=(
+                                0, 0, 255), isClosed=False, thickness=2, lineType=cv2.LINE_AA)
+                            for ballCoor in during_shooting['balls_during_shooting']:
+                                cv2.circle(img=trace, center=(ballCoor[0], ballCoor[1]), radius=10,
+                                           color=(0, 0, 255), thickness=-1)
+
+                        # reset all variables
+                        trajectory_fit(
+                            during_shooting['balls_during_shooting'], height, width, shot_result['judgement'], fig)
+                        during_shooting['balls_during_shooting'].clear()
+                        during_shooting['isShooting'] = False
+                        shooting_pose['ballInHand_frames_list'].append(
+                            shooting_pose['ballInHand_frames'])
+                        print("ball in hand frames: ",
+                              shooting_pose['ballInHand_frames'])
+                        shooting_pose['ballInHand_frames'] = 0
+
+                        print("elbow angle: ", shooting_pose['elbow_angle'])
+                        print("knee angle: ", shooting_pose['knee_angle'])
+                        shooting_pose['elbow_angle_list'].append(
+                            shooting_pose['elbow_angle'])
+                        shooting_pose['knee_angle_list'].append(
+                            shooting_pose['knee_angle'])
+                        shooting_pose['elbow_angle'] = 370
+                        shooting_pose['knee_angle'] = 370
+
+                    #draw blue circle
+                    cv2.circle(img=frame, center=(xCoor, yCoor), radius=10,
+                               color=(255, 0, 0), thickness=-1)
+                    cv2.circle(img=trace, center=(xCoor, yCoor), radius=10,
+                               color=(255, 0, 0), thickness=-1)
+
+                previous['ball'][0] = xCoor
+                previous['ball'][1] = yCoor
+
+            if(classes[0][i] == 2):  # Rim
+                # cover previous hoop with white rectangle
+                cv2.rectangle(
+                    trace, (previous['hoop'][0], previous['hoop'][1]), (previous['hoop'][2], previous['hoop'][3]), (255, 255, 255), 5)
+                cv2.rectangle(frame, (xmin, ymax),
+                              (xmax, ymin), (48, 124, 255), 5)
+                cv2.rectangle(trace, (xmin, ymax),
+                              (xmax, ymin), (48, 124, 255), 5)
+
+                #display judgement after shot
+                if(shot_result['displayFrames']):
+                    if(shot_result['judgement'] == "MISS"):
+                        cv2.putText(frame, shot_result['judgement'], (xCoor - 65, yCoor - 65),
+                                    cv2.FONT_HERSHEY_COMPLEX, 3, (0, 0, 255), 8)
+                    else:
+                        cv2.putText(frame, shot_result['judgement'], (xCoor - 65, yCoor - 65),
+                                    cv2.FONT_HERSHEY_COMPLEX, 3, (82, 168, 50), 8)
+
+                previous['hoop'][0] = xmin
+                previous['hoop'][1] = ymax
+                previous['hoop'][2] = xmax
+                previous['hoop'][3] = ymin
+                previous['hoop_height'] = max(ymin, previous['hoop_height'])
+
+    combined = np.concatenate((frame, trace), axis=1)
+    return combined, trace
+
+
 def main():
     mode, complexity, smooth_landmarks, enable_segmentation, smooth_segmentation, detectionCon, trackCon, mpPose = set_pose_parameters()
     pose = mpPose.Pose(mode, complexity, smooth_landmarks,
@@ -233,65 +431,131 @@ def main():
 
     # Setting video feed variables
     cap, count, direction, form, feedback, frame_queue = set_video_feed_variables()
+    width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+    height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    trace = np.full((int(height), int(width), 3), 255, np.uint8)
+
+    # Tensorflow initialization for ball tracking
+    detection_graph, image_tensor, boxes, scores, classes, num_detections = tensorflow_init()
 
     # shooter handedness
     lefty = False
 
     #Start video feed and run workout
     knee_form = 0
-    while cap.isOpened():
-        #Getting image from camera
-        ret, img = cap.read()
-        
-        #Getting video dimensions
-        width  = cap.get(3)  
-        height = cap.get(4)  
-        
-        #Convert from BGR (used by cv2) to RGB (used by Mediapipe)
-        results = pose.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-        
-        #Get pose and draw landmarks
-        img = get_pose(img, results, False)
-        
-        # Get landmark list from mediapipe
-        landmark_list = get_position(img, results, height, width, False)
-        
-        #If landmarks exist, get the relevant workout body angles and run workout. The points used are identifiers for specific joints
-        if len(landmark_list) != 0:
-            elbow_angle, shoulder_angle, hip_angle, elbow_angle_right, shoulder_angle_right, hip_angle_right, knee_angle = set_body_angles_from_keypoints(get_angle, img, landmark_list, lefty)
 
-            #print("shoulder angle: ", shoulder_angle)
-            #print("the hip angle is:", hip_angle)
+    fig = plt.figure()
+    #objects to store detection status
+    previous = {
+    'ball': np.array([0, 0]),  # x, y
+    'hoop': np.array([0, 0, 0, 0]),  # xmin, ymax, xmax, ymin
+        'hoop_height': 0
+    }
+    during_shooting = {
+        'isShooting': False,
+        'balls_during_shooting': [],
+        'release_angle_list': [],
+        'release_point': []
+    }
+    shooting_pose = {
+        'ball_in_hand': False,
+        'elbow_angle': 370,
+        'knee_angle': 370,
+        'ballInHand_frames': 0,
+        'elbow_angle_list': [],
+        'knee_angle_list': [],
+        'ballInHand_frames_list': []
+    }
+    shot_result = {
+        'displayFrames': 0,
+        'release_displayFrames': 0,
+        'judgement': ""
+    }
 
-            #Is the form correct at the start?
-            success_percentage, progress_bar = set_percentage_bar_and_text(elbow_angle, knee_angle)
-            
-            #Full workout motion
-            if knee_angle < 100 and knee_form == 0:
-                knee_form = 1
-                print(type(success_percentage), progress_bar)
-            if elbow_angle > 45 and elbow_angle < 60:
-                feedback = "Feedback: Correct posture for a perfect shot"
-            elif elbow_angle > 60 and elbow_angle < 90:
-                feedback = "Feedback: Correct posture for a good shot"
-            elif elbow_angle > 120:
-                feedback = "Feedback: Bend your elbows to make a 45 degree"
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    config.gpu_options.per_process_gpu_memory_fraction = 0.36
 
-            #Display workout stats        
-            display_workout_stats(count, knee_form, feedback, draw_percentage_progress_bar, show_workout_feedback, img, success_percentage, progress_bar)
+    skip_count = 0
+    with tf.Session(graph=detection_graph, config=config) as sess:
+        while cap.isOpened():
+            #Getting image from camera
+            ret, img = cap.read()
             
+            #Getting video dimensions
+            width  = cap.get(3)  
+            height = cap.get(4)  
             
-        # Transparent Overlay
-        overlay = img.copy()
-        x, y, w, h = 75, 10, 900, 100
-        cv2.rectangle(img, (x, y), (x+w, y+h), (255,255,255), -1)      
-        alpha = 0.75  # Transparency factor.
-        # Following line overlays transparent rectangle over the image
-        image_new = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)          
+            #Convert from BGR (used by cv2) to RGB (used by Mediapipe)
+            results = pose.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
             
-        cv2.imshow('Basketball Form GOAT', image_new)
-        if cv2.waitKey(10) & 0xFF == ord('q'):
-            break
+            #Get pose and draw landmarks
+            img = get_pose(img, results, False)
+            
+            # Get landmark list from mediapipe
+            landmark_list = get_position(img, results, height, width, False)
+            
+            #If landmarks exist, get the relevant workout body angles and run workout. The points used are identifiers for specific joints
+            if len(landmark_list) != 0:
+                elbow_angle, shoulder_angle, hip_angle, elbow_angle_right, shoulder_angle_right, hip_angle_right, knee_angle = set_body_angles_from_keypoints(get_angle, img, landmark_list, lefty)
+
+                # Elbow, knee, head, and hand coordinates
+                left_elbow_index = 13
+                left_knee_index = 25
+                right_elbow_index = 14
+                right_knee_index = 26
+                head_index = 0
+                hand_index = 16
+                left_elbow_landmark = landmark_list[left_elbow_index]
+                left_knee_landmark = landmark_list[left_knee_index]
+                right_elbow_landmark = landmark_list[right_elbow_index]
+                right_knee_landmark = landmark_list[right_knee_index]
+                head_landmark = landmark_list[head_index]
+                hand_landmark = landmark_list[hand_index]
+
+                # print(right_knee_landmark)
+
+                #print("shoulder angle: ", shoulder_angle)
+                #print("the hip angle is:", hip_angle)
+
+                #Is the form correct at the start?
+                success_percentage, progress_bar = set_percentage_bar_and_text(elbow_angle, knee_angle)
+                
+                #Full workout motion
+                if knee_angle < 100 and knee_form == 0:
+                    knee_form = 1
+                    print(type(success_percentage), progress_bar)
+                if elbow_angle > 45 and elbow_angle < 60:
+                    feedback = "Feedback: Correct posture for a perfect shot"
+                elif elbow_angle > 60 and elbow_angle < 90:
+                    feedback = "Feedback: Correct posture for a good shot"
+                elif elbow_angle > 120:
+                    feedback = "Feedback: Bend your elbows to make a 45 degree"
+
+
+                # # Start the detection here
+                detection, trace = detect_shot(img, trace, width, height, sess, image_tensor, boxes, scores, classes,
+                                            num_detections, previous, during_shooting, shot_result, fig, shooting_pose,
+                                            head_landmark, hand_landmark, elbow_angle, knee_angle, right_elbow_landmark, right_knee_landmark)
+
+                ## Finish the detection here
+
+                #Display workout stats        
+                display_workout_stats(count, knee_form, feedback, draw_percentage_progress_bar, show_workout_feedback, img, success_percentage, progress_bar)
+                
+                
+            # Transparent Overlay
+            overlay = img.copy()
+            x, y, w, h = 75, 10, 900, 100
+            cv2.rectangle(img, (x, y), (x+w, y+h), (255,255,255), -1)      
+            alpha = 0.75  # Transparency factor.
+            # Following line overlays transparent rectangle over the image
+            image_new = cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0)          
+                
+            cv2.imshow('Basketball Form GOAT', image_new)
+            if cv2.waitKey(10) & 0xFF == ord('q'):
+                break
             
     cap.release()
     cv2.destroyAllWindows()
