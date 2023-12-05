@@ -158,7 +158,7 @@ def get_angle(img, landmark_list, point1, point2, point3, lefty, draw=True):
 
 # Setting variables for video feed
 def set_video_feed_variables():
-    cap = cv2.VideoCapture("analysis/Videos/try.MOV")
+    cap = cv2.VideoCapture("analysis/Videos/one_score_one_miss.mp4")
     count = 0
     direction = 0
     form = 0
@@ -180,7 +180,10 @@ def set_body_angles_from_keypoints(get_angle, img, landmark_list, lefty):
     shoulder_angle_right = get_angle(img, landmark_list, 14, 12, 24, lefty)
     hip_angle_right = get_angle(img, landmark_list, 12, 24, 26, lefty)
     knee_angle = get_angle(img, landmark_list, 23, 25, 27, lefty)
-    return elbow_angle,shoulder_angle,hip_angle,elbow_angle_right,shoulder_angle_right,hip_angle_right,knee_angle
+    knee_angle_right = get_angle(img, landmark_list, 24, 26, 28, lefty)
+    ankle_angle = get_angle(img, landmark_list, 25, 27, 31, lefty)
+    ankle_angle_right = get_angle(img, landmark_list, 26, 28, 32, lefty)
+    return elbow_angle,shoulder_angle,hip_angle,elbow_angle_right,shoulder_angle_right,hip_angle_right,knee_angle, knee_angle_right, ankle_angle, ankle_angle_right
 
 def draw_percentage_progress_bar(knee_form, img, success_percentage, progress_bar):
     xd, yd, wd, hd = 10, 175, 50, 200
@@ -193,7 +196,7 @@ def draw_percentage_progress_bar(knee_form, img, success_percentage, progress_ba
         cv2.putText(img, f'{int(success_percentage)}%', (xd, yd+hd+50), cv2.FONT_HERSHEY_PLAIN, 2,
                         (255, 0, 0), 2)
 
-def show_workout_feedback(feedback, img):    
+'''def show_workout_feedback(feedback, img):    
     xf, yf = 85, 70
     cv2.putText(img, feedback, (xf, yf), cv2.FONT_HERSHEY_PLAIN, 2,
                     (0,0,0), 2)
@@ -203,7 +206,7 @@ def display_workout_stats(count, form, feedback, draw_percentage_progress_bar, s
     draw_percentage_progress_bar(form, img, success_percentage, progress_bar)
         
     #Show the feedback 
-    show_workout_feedback(feedback, img)
+    show_workout_feedback(feedback, img)'''
 
 
 def fit_func(x, a, b, c):
@@ -247,8 +250,15 @@ def calculateAngle(a, b, c):
 
 
 
-def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, classes, num_detections, previous, during_shooting, shot_result, fig, shooting_pose,
-                head_landmark, hand_landmark, elbow_angle, knee_angle, right_elbow_landmark, right_knee_landmark):
+def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, classes,
+                num_detections, previous, during_shooting, shot_result, fig, shooting_pose,
+                head_landmark, right_hand_landmark, elbow_angle, elbow_angle_right, knee_angle, 
+                knee_angle_right, right_elbow_landmark, left_elbow_landmark, right_knee_landmark, 
+                left_knee_landmark, left_hand_landmark, landmark_list, hip_angle, hip_angle_right, 
+                ankle_angle, ankle_angle_right, shoulder_angle, shoulder_angle_right, right_shoulder_landmark,
+                left_shoulder_landmark, kneeToAnkle, heelToToe, lefty):
+
+    
     global shooting_result
 
     if(shot_result['displayFrames'] > 0):
@@ -261,11 +271,14 @@ def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, 
 
 
     headX, headY = head_landmark[1:]
-    handX, handY = hand_landmark[1:]
+    handX, handY = left_hand_landmark[1:]
     elbowAngle = elbow_angle
     kneeAngle = knee_angle
     elbowX, elbowY = right_elbow_landmark[1:]
     kneeX, kneeY = right_knee_landmark[1:]
+    shoulderX, shoulderY = left_shoulder_landmark[1:]
+    toeX, toeY = 0,0
+    heelX, heelY = 0,0
 
     frame_expanded = np.expand_dims(frame, axis=0)
     # main tensorflow detection
@@ -276,16 +289,84 @@ def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, 
     # displaying MediaPipe keypoints, joint angle and release angle
     # frame = results.pose_landmarks.render(frame, mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2), mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2))
 
-    cv2.putText(frame, 'Elbow: ' + str(elbowAngle) + ' deg',
-                (elbowX + 65, elbowY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
-    cv2.putText(frame, 'Knee: ' + str(kneeAngle) + ' deg',
-                (kneeX + 65, kneeY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+    #cv2.putText(frame, 'Elbow: ' + str(elbowAngle) + ' deg',
+                #(elbowX + 65, elbowY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+    #cv2.putText(frame, 'Knee: ' + str(kneeAngle) + ' deg',
+                #(kneeX + 65, kneeY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+
+    # ball height is ankle y - ball y
+    # elbow height is ankle y - elbow y
+
+
+    if lefty == True:
+        ankleX, ankleY = landmark_list[29][1:]
+        handX, handY = left_hand_landmark[1:]
+        elbowX, elbowY = left_elbow_landmark[1:]
+        elbowAngle = elbow_angle
+        knee_angle = knee_angle
+        kneeX, kneeY = left_knee_landmark[1:]
+        shoulderX, shoulderY = left_shoulder_landmark[1:]
+        toeX, toeY = landmark_list[31][1:]
+        heelX, heelY = landmark_list[29][1:]
+    else:
+        ankleX, ankleY = landmark_list[29][1:]
+        handX, handY = right_hand_landmark[1:]
+        elbowX, elbowY = right_elbow_landmark[1:]
+        elbowAngle = elbow_angle_right
+        knee_angle = knee_angle_right
+        kneeX, kneeY = right_knee_landmark[1:]
+        shoulderX, shoulderY = right_shoulder_landmark[1:]
+        toeX, toeY = landmark_list[32][1:]
+        heelX, heelY = landmark_list[20][1:]
+
+    #actual distance knee to ankle / pixel distance knee to ankle
+    kneeToAnklePixel = math.sqrt((kneeY - ankleY) ** 2 + (kneeX - ankleX) ** 2)
+    verticalRatio = 0.002025
+
+    
+
+    #actual distance heel to toe / pixel distance heel to toe
+    heelToToePixel = math.sqrt((heelY - toeY) ** 2 + (heelX - toeX) ** 2)
+    horizontalRatio = 0.002025
+
+    #ball position:
+    #print("x: " + str(previous['ball'][0]) + " y: " + str(previous['ball'][1]))
+
+
+    #pre shot angles:
+    '''if lefty == True:
+        print("release hand height is: ", verticalRatio * (toeY - handY))
+
+        if handY - shoulderY <= 10 and during_shooting['isShooting'] == False:
+            print(str(hip_angle) + ", " + str(knee_angle) + ", " + str(ankle_angle) + ", " + str(elbow_angle) + ", " + str(shoulder_angle) + ", " + "0,0,0")
+            print("pre shot elbow height is: ", verticalRatio * (toeY - elbowY))
+
+    else:
+        print("release hand height is: ", verticalRatio * (toeY - handY))
+
+        if handY - shoulderY <= 10 and during_shooting['isShooting'] == False:
+            print(str(hip_angle_right) + ", " + str(knee_angle_right) + ", " + str(ankle_angle_right) + ", " + str(elbow_angle_right) + ", " + str(shoulder_angle_right) + ", " + "0,0,0")
+            print("pre shot elbow height is: ", verticalRatio * (toeY - elbowY))'''
+
+
     if(shot_result['release_displayFrames']):
         cv2.putText(frame, 'Release: ' + str(during_shooting['release_angle_list'][-1]) + ' deg',
                     (during_shooting['release_point'][0] - 80, during_shooting['release_point'][1] + 80), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 255), 3)
 
+        '''# ball height at release
+        ballHeight = ankleY - during_shooting['release_point'][1]
+
+        cv2.putText(frame, "Release Height: " + str(ballHeight) + ' pixels', (during_shooting['release_point'][0] - 80, during_shooting['release_point'][1] - 80), cv2.FONT_HERSHEY_PLAIN, 2,
+                    (82, 168, 50), 3)
+        
+        elbowHeight = ankleY - elbowY
+
+        # elbow height at release
+        cv2.putText(frame, 'Elbow: ' + str(elbowHeight) + ' pixels',
+                (elbowX + 65, elbowY), cv2.FONT_HERSHEY_COMPLEX, 1.3, (102, 255, 0), 3)
+'''
     for i, box in enumerate(boxes[0]):
-        if (scores[0][i] > 0.5):
+        if (scores[0][i] > 0.2):
             ymin = int((box[0] * height))
             xmin = int((box[1] * width))
             ymax = int((box[2] * height))
@@ -324,13 +405,24 @@ def detect_shot(frame, trace, width, height, sess, image_tensor, boxes, scores, 
                             release_angle)
                         during_shooting['release_point'] = first_shooting_point
                         shot_result['release_displayFrames'] = 30
-                        print("release angle:", release_angle)
+                        #print("release angle:", release_angle)
+                        ballHeight = verticalRatio * (toeY - during_shooting['release_point'][1])
+                        #print("ball to floor height: ", ballHeight)
+
+                        ballHorizontalDist = horizontalRatio * (toeX - during_shooting['release_point'][0])
+                        #print("ball horizontal dist: ", ballHorizontalDist)
+
+                        #elbowHeight = ankleY - elbowY
+                        #print("elbow height: " + str(elbowHeight) + " pixels")
 
                     #draw purple circle
                     cv2.circle(img=frame, center=(xCoor, yCoor), radius=7,
                                color=(235, 103, 193), thickness=3)
                     cv2.circle(img=trace, center=(xCoor, yCoor), radius=7,
                                color=(235, 103, 193), thickness=3)
+                    
+                    #ball position:
+                    print(str(xCoor) + ", " + str(yCoor))
 
                 # Not shooting
                 elif(ymin >= (previous['hoop_height'] - 30) and (distance([xCoor, yCoor], previous['ball']) < 100)):
@@ -440,7 +532,13 @@ def main():
     detection_graph, image_tensor, boxes, scores, classes, num_detections = tensorflow_init()
 
     # shooter handedness
-    lefty = False
+    lefty = True
+
+    # knee to ankle distance (m)
+    kneeToAnkle = 0.51
+
+    # heel to toe distance (m)
+    heelToToe = 0.24
 
     #Start video feed and run workout
     knee_form = 0
@@ -498,7 +596,7 @@ def main():
             
             #If landmarks exist, get the relevant workout body angles and run workout. The points used are identifiers for specific joints
             if len(landmark_list) != 0:
-                elbow_angle, shoulder_angle, hip_angle, elbow_angle_right, shoulder_angle_right, hip_angle_right, knee_angle = set_body_angles_from_keypoints(get_angle, img, landmark_list, lefty)
+                elbow_angle, shoulder_angle, hip_angle, elbow_angle_right, shoulder_angle_right, hip_angle_right, knee_angle, knee_angle_right, ankle_angle, ankle_angle_right = set_body_angles_from_keypoints(get_angle, img, landmark_list, lefty)
 
                 # Elbow, knee, head, and hand coordinates
                 left_elbow_index = 13
@@ -506,13 +604,19 @@ def main():
                 right_elbow_index = 14
                 right_knee_index = 26
                 head_index = 0
-                hand_index = 16
+                right_hand_index = 16
+                left_hand_index = 15
+                right_shoulder_index = 12
+                left_shoulder_index = 11
                 left_elbow_landmark = landmark_list[left_elbow_index]
                 left_knee_landmark = landmark_list[left_knee_index]
                 right_elbow_landmark = landmark_list[right_elbow_index]
                 right_knee_landmark = landmark_list[right_knee_index]
                 head_landmark = landmark_list[head_index]
-                hand_landmark = landmark_list[hand_index]
+                right_hand_landmark = landmark_list[right_hand_index]
+                left_hand_landmark = landmark_list[left_hand_index]
+                right_shoulder_landmark = landmark_list[right_shoulder_index]
+                left_shoulder_landmark = landmark_list[left_shoulder_index]
 
                 # print(right_knee_landmark)
 
@@ -537,12 +641,15 @@ def main():
                 # # Start the detection here
                 detection, trace = detect_shot(img, trace, width, height, sess, image_tensor, boxes, scores, classes,
                                             num_detections, previous, during_shooting, shot_result, fig, shooting_pose,
-                                            head_landmark, hand_landmark, elbow_angle, knee_angle, right_elbow_landmark, right_knee_landmark)
+                                            head_landmark, right_hand_landmark, elbow_angle, elbow_angle_right, knee_angle, 
+                                            knee_angle_right, right_elbow_landmark, left_elbow_landmark, right_knee_landmark, 
+                                            left_knee_landmark, left_hand_landmark, landmark_list, hip_angle, hip_angle_right, 
+                                            ankle_angle, ankle_angle_right, shoulder_angle, shoulder_angle_right, right_shoulder_landmark, left_shoulder_landmark, kneeToAnkle, heelToToe, lefty)
 
                 ## Finish the detection here
 
                 #Display workout stats        
-                display_workout_stats(count, knee_form, feedback, draw_percentage_progress_bar, show_workout_feedback, img, success_percentage, progress_bar)
+                #display_workout_stats(count, knee_form, feedback, draw_percentage_progress_bar, show_workout_feedback, img, success_percentage, progress_bar)
                 
                 
             # Transparent Overlay

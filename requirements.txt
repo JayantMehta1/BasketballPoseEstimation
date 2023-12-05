@@ -1,3 +1,5 @@
 mediapipe
 numpy
+Flask
 matplotlib
+scipy
